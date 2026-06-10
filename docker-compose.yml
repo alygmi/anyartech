@@ -1,0 +1,244 @@
+version: "3.9"
+
+# ============================================================
+# Anyar Retail Indonesia — HRIS + Purchasing System
+# Jalankan semua dengan: docker-compose up -d --build
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Auth Service (port 8001)
+  # ----------------------------------------------------------
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+      network: host                         # FIX: composer install bisa akses internet
+    container_name: auth_service
+    restart: unless-stopped
+    ports:
+      - "8001:8080"
+    environment:
+      APP_ENV: local
+      APP_KEY: ${AUTH_APP_KEY}
+      APP_URL: http://localhost:8001
+      DB_CONNECTION: mysql
+      DB_HOST: db_auth
+      DB_PORT: 3306
+      DB_DATABASE: db_auth
+      DB_USERNAME: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+      SESSION_DRIVER: redis
+    command: >
+      sh -c "php artisan migrate --force &&
+             php artisan db:seed --force &&
+             php-fpm"
+    depends_on:
+      db_auth:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Database Auth (db_auth)
+  # ----------------------------------------------------------
+  db_auth:
+    image: mysql:8.0
+    container_name: db_auth
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: db_auth
+    volumes:
+      - db_auth_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Redis — blacklist token + notification inbox + caching
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: anyartech_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes  # FIX: persist data supaya blacklist token tidak hilang
+    volumes:
+      - redis_data:/data                    # FIX: tambah volume
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Employee Service (port 8002)
+  # ----------------------------------------------------------
+  employee-service:
+    build:
+      context: ./employee-service
+      dockerfile: Dockerfile
+      network: host                         # FIX: composer install bisa akses internet
+    container_name: employee_service
+    restart: unless-stopped
+    ports:
+      - "8002:8080"
+    environment:
+      APP_ENV: local
+      APP_KEY: ${EMPLOYEE_APP_KEY}
+      APP_URL: http://localhost:8002
+      DB_CONNECTION: mysql
+      DB_HOST: db_hrm
+      DB_PORT: 3306
+      DB_DATABASE: db_hrm
+      DB_USERNAME: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      AUTH_SERVICE_URL: http://auth-service:8080
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+    command: >
+      sh -c "php artisan migrate --force &&
+             php artisan db:seed --force &&
+             php-fpm"
+    depends_on:
+      db_hrm:
+        condition: service_healthy
+      auth-service:                         # FIX: tunggu auth-service dulu
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Database Employee/HRM (db_hrm)
+  # ----------------------------------------------------------
+  db_hrm:
+    image: mysql:8.0
+    container_name: db_hrm
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: db_hrm
+    volumes:
+      - db_hrm_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Purchase Service (port 8003)
+  # ----------------------------------------------------------
+  purchase-service:
+    build:
+      context: ./purchase-service
+      dockerfile: Dockerfile
+      network: host                         # FIX: composer install bisa akses internet
+    container_name: purchase_service
+    restart: unless-stopped
+    ports:
+      - "8003:8080"
+    environment:
+      APP_ENV: local
+      APP_KEY: ${PURCHASE_APP_KEY}
+      APP_URL: http://localhost:8003
+      DB_CONNECTION: mysql
+      DB_HOST: db_purchasing
+      DB_PORT: 3306
+      DB_DATABASE: db_purchasing
+      DB_USERNAME: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      AUTH_SERVICE_URL: http://auth-service:8080
+      EMPLOYEE_SERVICE_URL: http://employee-service:8080   # FIX: untuk GET /branches
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+    command: >
+      sh -c "php artisan migrate --force &&
+             php artisan db:seed --force &&
+             php-fpm"
+    depends_on:
+      db_purchasing:
+        condition: service_healthy
+      auth-service:                         # FIX: tunggu auth-service
+        condition: service_started
+      employee-service:                     # FIX: tunggu employee-service (butuh GET /branches)
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Database Purchase (db_purchasing)
+  # ----------------------------------------------------------
+  db_purchasing:
+    image: mysql:8.0
+    container_name: db_purchasing
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: db_purchasing
+    volumes:
+      - db_purchasing_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - anyartech_network
+
+  # ----------------------------------------------------------
+  # Nginx — API Gateway (port 80)
+  # ----------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: anyartech_gateway
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - auth-service
+      - employee-service
+      - purchase-service
+    networks:
+      - anyartech_network
+
+# ============================================================
+# Volumes & Networks
+# ============================================================
+volumes:
+  db_auth_data:
+  db_hrm_data:
+  db_purchasing_data:
+  redis_data:           # FIX: tambah volume redis
+
+networks:
+  anyartech_network:
+    driver: bridge
